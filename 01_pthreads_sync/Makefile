@@ -82,6 +82,17 @@ create-sysvipc-sem:
 # Miscellaneous
 #---------------
 
+GDB_FLAGS = \
+	--eval-command="set architecture x86-64" \
+	--eval-command="file $(EXECUTABLE)" \
+	--eval-command="b main" \
+	--eval-command="run" \
+	--eval-command="tui e" \
+	--eval-command="la regs"
+
+gdb: $(EXECUTABLE)
+	gdb $(GDB_FLAGS)
+
 clean:
 	@printf "$(BYELLOW)Cleaning build directory$(RESET)\n"
 	@rm -rf build

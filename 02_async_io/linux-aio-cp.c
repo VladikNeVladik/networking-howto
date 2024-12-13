@@ -11,6 +11,7 @@
 
 #define READ_BLOCK_SIZE 8192U
 #define QUEUE_SIZE 64U
+#define FILE_SIZE "256M"
 
 //======================
 // Basic AIO operations

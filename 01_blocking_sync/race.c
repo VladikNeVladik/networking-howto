@@ -19,7 +19,7 @@
 #define NUM_THREADS 8U
 #define NUM_HARDWARE_THREAD 8U
 
-const size_t NUM_ITERATIONS = 10000000U;
+const size_t NUM_ITERATIONS = 1000000U;
 
 //------------------
 // Thread execution

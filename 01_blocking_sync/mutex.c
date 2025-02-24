@@ -11,9 +11,6 @@
 #include <sched.h>
 // Threads:
 #include <pthread.h>
-// POSIX semaphores:
-#include <sys/stat.h>
-#include <semaphore.h>
 
 //----------------------
 // Benchmark parameters
@@ -22,7 +19,7 @@
 #define NUM_THREADS 8U
 #define NUM_HARDWARE_THREAD 8U
 
-const size_t NUM_ITERATIONS = 10000000U;
+const size_t NUM_ITERATIONS = 1000000U;
 
 //------------------
 // Thread execution
@@ -30,7 +27,7 @@ const size_t NUM_ITERATIONS = 10000000U;
 
 typedef struct {
     size_t thread_i;
-    sem_t* sem;
+    pthread_mutex_t* mutex;
 } THREAD_ARGS;
 
 // Variable to race on:
@@ -45,19 +42,19 @@ void* thread_func(void* thread_args)
     for (size_t i = 0U; i < NUM_ITERATIONS; ++i)
     {
         // Basic critical section among the threads:
-        int ret = sem_wait(args->sem);
-        if (ret == -1)
+        int ret = pthread_mutex_lock(args->mutex);
+        if (ret != 0)
         {
-            fprintf(stderr, "Unable to lock semaphore lock\n");
+            fprintf(stderr, "Unable to call pthread_mutex_lock\n");
             exit(EXIT_FAILURE);
         }
 
         var++;
 
-        ret = sem_post(args->sem);
-        if (ret == -1)
+        ret = pthread_mutex_unlock(args->mutex);
+        if (ret != 0)
         {
-            fprintf(stderr, "Unable to unlock semaphore lock\n");
+            fprintf(stderr, "Unable to call pthread_mutex_unlock\n");
             exit(EXIT_FAILURE);
         }
     }
@@ -73,20 +70,19 @@ typedef struct {
     pthread_t tid;
 } THREAD_INFO;
 
+
 int main()
 {
-    // Initialize POSIX semaphore:
-    sem_t sem;
-    sem_init(&sem, 0 /* sem is not shared */, 1U /* init value */);
+    // Initialize mutual exclusion object:
+    // NOTE: by default, use fast mutexes.
+    pthread_mutex_t mutex_var = PTHREAD_MUTEX_INITIALIZER;
 
     // Initialize thread data:
     THREAD_ARGS args[NUM_THREADS];
     for (size_t i = 0U; i < NUM_THREADS; ++i)
     {
-        args[i] = (THREAD_ARGS) {
-            .thread_i = i,
-            .sem      = &sem
-        };
+        args[i].thread_i = i;
+        args[i].mutex    = &mutex_var;
     }
 
     // Spawn threads:
@@ -145,6 +141,9 @@ int main()
 
     // Print incremented variable:
     printf("Result of the computation: %u\n", var);
+
+    // Destroy mutex object (a formality):
+    pthread_mutex_destroy(&mutex_var);
 
     return EXIT_SUCCESS;
 }

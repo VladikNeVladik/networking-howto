@@ -1,4 +1,4 @@
-// No copyright. Vladislav Alenik, 2024
+// Copyright Vladislav Alenik, 2024
 
 // Feature test macro:
 #define _GNU_SOURCE

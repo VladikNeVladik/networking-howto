@@ -1,91 +1,114 @@
-// No copyright. Vladislav Alenik, 2024
-// Modified by me
+// Copyright Egor Ermolovich && Vladislav Alenik, 2024
 
-// Feature test macro:
+// Feature test macro.
 #define _GNU_SOURCE
 
 #include <stdlib.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <unistd.h>
-#include <sys/syscall.h> // syscall
-#include <linux/futex.h> // FUTEX_* macros
+#include <sys/syscall.h>
+#include <linux/futex.h>
 
-// CPU_SET macros:
 #include <sched.h>
-// Threads:
 #include <pthread.h>
+#include <stdatomic.h>
 
 #include <assert.h>
 
-//----------------------
-// Benchmark parameters
-//----------------------
+//----------------------------
+// Параметры тестового стенда
+//----------------------------
 
-#define NUM_THREADS 4U
-#define NUM_HARDWARE_THREAD 4U
+#define NUM_THREADS 8U
+#define NUM_HARDWARE_THREAD 8U
 
-const size_t NUM_ITERATIONS = 10000000U;
+const size_t NUM_ITERATIONS = 1000000U;
 
-//------------------
-// Thread execution
-//------------------
+//-------------------------------
+// Совместное исполнение потоков
+//-------------------------------
 
-typedef struct {
+typedef struct
+{
     size_t thread_i;
     int* mutex;
 } THREAD_ARGS;
 
-// Variable to race on:
+// Переменная, доступ к которой должен быть защищён с помощью критической секции.
 uint32_t var = 0U;
 
-// states of mutex
-enum {
-    M_ULOCKD   =  0x0800,
-    M_LOCKD    = 0x1000,
-    M_LOCKD_WQ = 0x2000
+// Состояния мьютекса.
+enum
+{
+    // Мьютекс разблокирован.
+    M_ULOCKD = 0,
+    // Мьютекс заблокирован.
+    M_LOCKD = 1,
+    // Мьютекс заблокирован и за время блокировки имел как минимум один поток в очереди ожидания.
+    M_LOCKD_WQ = 2
 };
 
-// futex_syscall wrapper
-static int futex(int *uaddr, int futex_op, int val,
-        const struct timespec *timeout, int *uaddr2, int val3) {
+// Обёртка системного вызова futex().
+static int futex(
+    int* uaddr,
+    int futex_op,
+    int val,
+    const struct timespec *timeout,
+    int* uaddr2,
+    int val3)
+{
     return syscall(SYS_futex, uaddr, futex_op, val, timeout, uaddr2, val3);
 }
 
-// mutex lock function
-void lock(int *mutex) {
-    int c;
+// Блокировка мьютекса.
+void lock(int *mutex)
+{
+    // Ожидаемое предыдущее состояние фьютекса.
+    int status = M_ULOCKD;
 
-    // tl;dr - if mutex is non-zero and isn't equal to 2 (M_LOCKD_WQ), we change it to M_LOCKD_WQ
-    // and waiting in cycle via futex_wait until mutex is changed
-    // then we are looking at our mutex again, until it isn't free
-    // if it's M_ULOCKD, then we are locking it by writing M_LOCKD_WQ
+    // (1) Пытаемся атомарно преваритить разблокированный мьютекс в заблокированный.
+    // В значение status записывается текущее состояние мьютекса.
+    atomic_compare_exchange_strong_explicit(mutex, &status, M_LOCKD, memory_order_acquire, memory_order_relaxed);
 
-    // atomic cmpxchg which returns value before op in variable and
-    // exchanging var and 3rd arg if var == 2nd arg
+    if (status != M_ULOCKD)
+    { // До выполнения операции (1) мьютекс уже был заблокирован.
+        if (status != M_LOCKD_WQ)
+        {   // До выполнения операции (1) мьютекс был заблокирован единожды и не имел потоков в очереди ожидания.
 
-    if ((c = __sync_val_compare_and_swap(mutex, M_ULOCKD, M_LOCKD)) != M_ULOCKD) {
-        if (c != M_LOCKD_WQ) {
-            c = __atomic_exchange_n(mutex, M_LOCKD_WQ, __ATOMIC_ACQ_REL);
+            // (2) Атомарно записываем в мьютекс состояние
+            // "заблокирован и за время блокировки имел как минимум один поток в очереди ожидания".
+            // В значение status записывается текущее состояние мьютекса.
+            status = atomic_exchange_explicit(mutex, M_LOCKD_WQ, memory_order_acquire);
         }
 
-        while (c != M_ULOCKD) {
+        // Ожидаем освобождения мьютекса.
+        while (status != M_ULOCKD)
+        {
+            // Если состояние фьютекса M_LOCKD_WQ, то становимся в очередь ожидания для данного объекта фьютекса.
+            // В планировщике состояние процесса меняется на "заблокирован".
+            // Выход из данного системного вызова возможен по вызову в операции unlock.
             futex(mutex, FUTEX_WAIT, M_LOCKD_WQ, NULL, NULL, 0);
-            c = __atomic_exchange_n(mutex, M_LOCKD_WQ, __ATOMIC_ACQ_REL);
+
+            // Атомарно производим блокировку.
+            status = atomic_exchange_explicit(mutex, M_LOCKD_WQ, memory_order_acquire);
         }
     }
 }
 
-// mutex unlock
-void unlock(int *mutex) {
-    // atomic decrement returning old value of variable
-    if (__atomic_fetch_sub(mutex, (int)M_ULOCKD, __ATOMIC_ACQ_REL) != M_LOCKD) {
-        *mutex = M_ULOCKD;
+// Разблокировка мьютекса.
+void unlock(int *mutex)
+{
+    // Атомарное разблокирование счётчика.
+    if (atomic_fetch_sub_explicit(mutex, 1, memory_order_relaxed) != M_LOCKD)
+    {
+        // В случае успеха обновляем состояние фьютекса.
+        atomic_store_explicit(mutex, M_ULOCKD, memory_order_release);
+
+        // Оповещаем другие потоки, заблокированные на фьютексе.
         futex(mutex, FUTEX_WAKE, 1, NULL, NULL, 0);
     }
 }
-
-_Atomic bool in_critical_section = false;
 
 void* thread_func(void* thread_args)
 {
@@ -94,11 +117,11 @@ void* thread_func(void* thread_args)
 
     for (size_t i = 0U; i < NUM_ITERATIONS; ++i)
     {
-        // Basic critical section among the threads:
+        // Организуем критическую секцию для переменной var.
         lock(args->mutex);
 
         if (*args->mutex != M_LOCKD && *args->mutex != M_ULOCKD && *args->mutex != M_LOCKD_WQ) {
-            printf("atomics are not atomic :)\n");
+            printf("Futex implementation is invalid\n");
         }
 
         var++;
@@ -109,21 +132,28 @@ void* thread_func(void* thread_args)
     return NULL;
 }
 
-//------------------
-// Thread benchmark
-//------------------
+//--------------------------------
+// Инициализация тестового стенда
+//--------------------------------
 
-typedef struct {
+typedef struct
+{
     pthread_t tid;
 } THREAD_INFO;
 
-int main() {
-    // Initialize mutual exclusion object:
+// Параметр для изучения явлений происходящих при расположении
+// объекта синхронизации на границе кеш-линий.
+// Почему при сдвиге 61 программа работает в 10 раз медленнее, чем при сдвиге 60?
+#define MUTEX_ALIGNMENT_SHIFT 56U
+
+int main()
+{
+    // Инициализируем объект синхронизации.
     _Alignas(64) char mutex[128] = {};
-    int* mutex_var = (int*) &mutex[62];
+    int* mutex_var = (int*) &mutex[MUTEX_ALIGNMENT_SHIFT];
     *mutex_var = M_ULOCKD;
 
-    // Initialize thread data:
+    // Инициализируем параметры потоков.
     THREAD_ARGS args[NUM_THREADS];
     for (size_t i = 0U; i < NUM_THREADS; ++i)
     {
@@ -131,57 +161,63 @@ int main() {
         args[i].mutex    = mutex_var;
     }
 
-    // Spawn threads:
+    // Запуск потоков.
     THREAD_INFO thread_info[NUM_THREADS];
     for (size_t i = 0U; i < NUM_THREADS; ++i)
     {
-        // Initialize thread attributes:
+        // Инициализируем аттрибуты потока.
         pthread_attr_t thread_attributes;
         int ret = pthread_attr_init(&thread_attributes);
-        if (ret != 0) {
+        if (ret != 0)
+        {
             fprintf(stderr, "Unable to call pthread_attr_init\n");
             exit(EXIT_FAILURE);
         }
 
-        // Assign hardware thread to posix thread:
+        // Назначаем аппаратные потоки для потоков POSIX.
         cpu_set_t assigned_harts;
         CPU_ZERO(&assigned_harts);
 
-        // Assumptions:
-        // - There are NUM_HARDWARE_THREAD hardware threads.
-        // - All harts from 0 to are present.
+        // Предположения о системе:
+        // - Система имеет NUM_HARDWARE_THREAD аппаратных потоков.
+        //   Это число возможно извлекать из системы напрямую
+        // - Все аппаратные потоки с 0 по NUM_HARDWARE_THREAD-1 активны.
+        //   Это требование может нарушаться при выходе из строя какого-нибудь из ядер процессора.
         size_t hart_i = i % NUM_HARDWARE_THREAD;
         CPU_SET(hart_i, &assigned_harts);
 
-        // Set thread affinity:
+        // Устанавливаем аффинность потока.
         ret = pthread_attr_setaffinity_np(&thread_attributes, sizeof(cpu_set_t), &assigned_harts);
-        if (ret != 0) {
+        if (ret != 0)
+        {
             fprintf(stderr, "Unable to call pthread_attr_setaffinity_np\n");
             exit(EXIT_FAILURE);
         }
 
-        // Create POSIX thread:
+        // Создаём потоки POSIX.
         ret = pthread_create(&thread_info[i].tid, &thread_attributes, thread_func, &args[i]);
-        if (ret != 0) {
+        if (ret != 0)
+        {
             fprintf(stderr, "Unable to create thread\n");
             exit(EXIT_FAILURE);
         }
 
-        // Destroy thread attribute object:
+        // Удаляем объект с аттрибутами потока.
         pthread_attr_destroy(&thread_attributes);
     }
 
-    // Wait for all threads to finish execution:
-    for (size_t i = 0; i < NUM_THREADS; ++i) {
+    // Ждём, пока все потоки закончат выполнение.
+    for (size_t i = 0; i < NUM_THREADS; ++i)
+    {
         int ret = pthread_join(thread_info[i].tid, NULL);
-
-        if (ret != 0) {
+        if (ret != 0)
+        {
             fprintf(stderr, "Unable to join thread\n");
             exit(EXIT_FAILURE);
         }
     }
 
-    // Print incremented variable:
+    // Выводим результат вычисления.
     printf("Result of the computation: %u\n", var);
 
     return EXIT_SUCCESS;

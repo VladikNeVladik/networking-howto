@@ -18,34 +18,53 @@
 #define NUM_THREADS 8U
 #define NUM_HARDWARE_THREAD 8U
 
-const size_t NUM_ITERATIONS = 10000000U;
+const size_t NUM_ITERATIONS = 1000U;
 
-//-----------------------
-// Реализация spinlock-а
-//-----------------------
+//------------------------------------------------------------------
+// Ticket lock
+//------------------------------------------------------------------
+// Оптимизации:
+// - FIFO fairness
+// - Инструкция x86 "pause" для энергоэффективного ожидания.
+// - Переходим к следующему потоку при взятой блокировке.
+//------------------------------------------------------------------
+
+#define spinloop_pause() __asm__ volatile("pause")
 
 typedef struct
 {
-    atomic_flag lock_taken;
-} SIMPLE_TAS_Lock;
+    _Atomic uint16_t next_ticket;
+    _Atomic uint16_t now_serving;
+} TicketLock;
 
-void SIMPLE_TAS_init(SIMPLE_TAS_Lock* lock)
+const unsigned TICKET_CYCLES_TO_SPIN = 100;
+
+void TicketLock_init(TicketLock* lock)
 {
-    atomic_flag_clear_explicit(&lock->lock_taken, memory_order_release);
+    atomic_store_explicit(&lock->next_ticket, 0, memory_order_relaxed);
+    atomic_store_explicit(&lock->now_serving, 0, memory_order_release);
 }
 
-void SIMPLE_TAS_acquire(SIMPLE_TAS_Lock* lock)
+void TicketLock_acquire(TicketLock* lock)
 {
-    while (atomic_flag_test_and_set_explicit(&lock->lock_taken, memory_order_acquire) != 0)
+    // Acquire a ticket in a queue:
+    const short ticket = atomic_fetch_add_explicit(&lock->next_ticket, 1U, memory_order_relaxed);
+
+    // On start spin-loop waiting for the lock to be released:
+    for (unsigned cycle_no = 0; lock->now_serving != ticket && cycle_no < TICKET_CYCLES_TO_SPIN; ++cycle_no)
     {
-        // Специальная инструкция архитектуры x86 для энергоэффективного ожидания.
-        __asm__ volatile("pause");
+        spinloop_pause();
+    }
+
+    while (atomic_load_explicit(&lock->now_serving, memory_order_acquire) != ticket)
+    {
+        sched_yield();
     }
 }
 
-void SIMPLE_TAS_release(SIMPLE_TAS_Lock* lock)
+void TicketLock_release(TicketLock* lock)
 {
-    atomic_flag_clear_explicit(&lock->lock_taken, memory_order_release);
+    atomic_fetch_add_explicit(&lock->now_serving, 1, memory_order_release);
 }
 
 //-------------------------------
@@ -54,7 +73,7 @@ void SIMPLE_TAS_release(SIMPLE_TAS_Lock* lock)
 
 typedef struct {
     size_t thread_i;
-    SIMPLE_TAS_Lock* spinlock;
+    TicketLock* spinlock;
 } THREAD_ARGS;
 
 // Переменная, которую инкрементируют все потоки.
@@ -69,11 +88,11 @@ void* thread_func(void* thread_args)
     for (size_t i = 0U; i < NUM_ITERATIONS; ++i)
     {
         // Создание критической секции с помощью spinlock-а.
-        SIMPLE_TAS_acquire(args->spinlock);
+        TicketLock_acquire(args->spinlock);
 
         var++;
 
-        SIMPLE_TAS_release(args->spinlock);
+        TicketLock_release(args->spinlock);
     }
 
     return NULL;
@@ -90,8 +109,8 @@ typedef struct {
 int main()
 {
     // Инициализируем объект синхронизации.
-    SIMPLE_TAS_Lock spinlock;
-    SIMPLE_TAS_init(&spinlock);
+    TicketLock spinlock;
+    TicketLock_init(&spinlock);
 
     // Инициализируем параметры потоков.
     THREAD_ARGS args[NUM_THREADS];

@@ -20,30 +20,64 @@
 
 const size_t NUM_ITERATIONS = 10000000U;
 
-//-----------------------
-// Реализация spinlock-а
-//-----------------------
+//------------------------------------------------------------------
+// TTAS lock
+//------------------------------------------------------------------
+// Оптимизации:
+// - Отложение записи по отношение к чтению более cache-friendly
+// - Инструкция x86 "pause" для энергоэффективного ожидания.
+// - Стратегия "exponential backoff".
+//------------------------------------------------------------------
+
+#define spinloop_pause() __asm__ volatile("pause")
 
 typedef struct
 {
-    atomic_flag lock_taken;
-} SIMPLE_TAS_Lock;
+    _Atomic uint8_t lock_taken;
+} TTAS_Lock;
 
-void SIMPLE_TAS_init(SIMPLE_TAS_Lock* lock)
+const unsigned TTAS_CYCLES_TO_SPIN          =    10;
+const unsigned TTAS_MIN_BACKOFF_NANOSECONDS =  1000;
+const unsigned TTAS_MAX_BACKOFF_NANOSECONDS = 64000;
+
+void TTAS_init(TTAS_Lock* lock)
 {
     atomic_flag_clear_explicit(&lock->lock_taken, memory_order_release);
 }
 
-void SIMPLE_TAS_acquire(SIMPLE_TAS_Lock* lock)
+void TTAS_acquire(TTAS_Lock* lock)
 {
-    while (atomic_flag_test_and_set_explicit(&lock->lock_taken, memory_order_acquire) != 0)
+    unsigned backoff_sleep = TTAS_MIN_BACKOFF_NANOSECONDS;
+
+    // On start spin-loop waiting for the lock to be released:
+    for (unsigned cycle_no = 0; atomic_load_explicit(&lock->lock_taken, memory_order_seq_cst) != 0 && cycle_no < TTAS_CYCLES_TO_SPIN; ++cycle_no)
     {
-        // Специальная инструкция архитектуры x86 для энергоэффективного ожидания.
-        __asm__ volatile("pause");
+        spinloop_pause();
+    }
+
+    // Perform exponential backoff:
+    while (1)
+    {
+        if (atomic_load_explicit(&lock->lock_taken, memory_order_seq_cst) != 0)
+        {
+            struct timespec to_sleep = {
+                .tv_sec  = 0,
+                .tv_nsec = backoff_sleep + (rand() % TTAS_MIN_BACKOFF_NANOSECONDS)
+            };
+
+            if (backoff_sleep < TTAS_MAX_BACKOFF_NANOSECONDS) backoff_sleep *= 2;
+
+            // No value-checking, because it doesn't affect correctness:
+            nanosleep(&to_sleep, NULL);
+
+            continue;
+        }
+
+        if (!atomic_flag_test_and_set_explicit(&lock->lock_taken, memory_order_acquire)) return;
     }
 }
 
-void SIMPLE_TAS_release(SIMPLE_TAS_Lock* lock)
+void TTAS_release(TTAS_Lock* lock)
 {
     atomic_flag_clear_explicit(&lock->lock_taken, memory_order_release);
 }
@@ -54,7 +88,7 @@ void SIMPLE_TAS_release(SIMPLE_TAS_Lock* lock)
 
 typedef struct {
     size_t thread_i;
-    SIMPLE_TAS_Lock* spinlock;
+    TTAS_Lock* spinlock;
 } THREAD_ARGS;
 
 // Переменная, которую инкрементируют все потоки.
@@ -69,11 +103,11 @@ void* thread_func(void* thread_args)
     for (size_t i = 0U; i < NUM_ITERATIONS; ++i)
     {
         // Создание критической секции с помощью spinlock-а.
-        SIMPLE_TAS_acquire(args->spinlock);
+        TTAS_acquire(args->spinlock);
 
         var++;
 
-        SIMPLE_TAS_release(args->spinlock);
+        TTAS_release(args->spinlock);
     }
 
     return NULL;
@@ -90,8 +124,8 @@ typedef struct {
 int main()
 {
     // Инициализируем объект синхронизации.
-    SIMPLE_TAS_Lock spinlock;
-    SIMPLE_TAS_init(&spinlock);
+    TTAS_Lock spinlock;
+    TTAS_init(&spinlock);
 
     // Инициализируем параметры потоков.
     THREAD_ARGS args[NUM_THREADS];

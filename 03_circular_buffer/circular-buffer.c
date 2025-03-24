@@ -1,4 +1,4 @@
-// No copyright. Vladislav Alenik, 2024
+// No copyright. Vladislav Alenik && Evgeny Baskov, 2024
 
 // Feature test macro:
 #define _GNU_SOURCE
@@ -19,7 +19,7 @@
 //======================
 
 #define QUEUE_SIZE     8U
-#define NUM_ITERATIONS 100000ULL
+#define NUM_ITERATIONS 1000ULL
 
 #define ENABLE_PADDING 0
 
@@ -32,7 +32,6 @@
 
 //-------------------------
 // Lock-free circular API
-// NOTE: thx Evgeny Baskov
 //-------------------------
 
 #define CACHE_LINE_SIZE 256

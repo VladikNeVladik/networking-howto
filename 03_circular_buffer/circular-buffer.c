@@ -7,38 +7,35 @@
 #include <stdint.h>
 #include <stdio.h>
 
-// CPU_SET macros:
 #include <sched.h>
-// Threads:
 #include <pthread.h>
-// Atomics:
 #include <stdatomic.h>
 
-//======================
-// Benchmark parameters
-//======================
+//============================
+// Параметры тестового стенда
+//============================
 
-#define QUEUE_SIZE     8U
-#define NUM_ITERATIONS 1000ULL
+#define QUEUE_SIZE     64U
+#define NUM_ITERATIONS 100000000ULL
 
 #define ENABLE_PADDING 0
 
 #define ENABLE_SIMPLE  1
 
-#define ENABLE_BACKOFF 0
+#define ENABLE_BACKOFF 1
 #define NUM_RETRIES    10U
 
-#define NUM_HARDWARE_THREADS 1U
+#define NUM_HARDWARE_THREADS 2U
 
-//-------------------------
-// Lock-free circular API
-//-------------------------
+//---------------------------
+// Lock-free кольцевой буфер
+//---------------------------
 
 #define CACHE_LINE_SIZE 256
 
 typedef struct {
     uint64_t* data;
-    uint32_t mask;
+    uint32_t size;
 
     uint32_t cached_head;
 #if ENABLE_PADDING == 1
@@ -48,11 +45,11 @@ typedef struct {
 #if ENABLE_PADDING == 1
     uint8_t pad1[CACHE_LINE_SIZE];
 #endif
-    uint32_t head;
+    _Atomic uint32_t head;
 #if ENABLE_PADDING == 1
     uint8_t pad2[CACHE_LINE_SIZE];
 #endif
-    uint32_t tail;
+    _Atomic uint32_t tail;
 } QUEUE;
 
 void queue_init(QUEUE* queue, uint32_t size)
@@ -70,6 +67,7 @@ void queue_init(QUEUE* queue, uint32_t size)
         exit(EXIT_FAILURE);
     }
 
+    queue->size = size;
     queue->cached_head = 0U;
     queue->cached_tail = 0U;
     queue->head = 0U;
@@ -80,19 +78,19 @@ bool queue_enqueue(QUEUE* queue, uint64_t elem)
 {
     uint32_t tail = atomic_load_explicit(&queue->tail, memory_order_relaxed);
 
-    if ((int32_t)(tail - (queue->cached_head + queue->mask)) > 0)
+    if (tail - queue->cached_head == queue->size)
     {
-        uint32_t cached_head = atomic_load_explicit(&queue->head, memory_order_relaxed);
+        uint32_t head = atomic_load_explicit(&queue->head, memory_order_acquire);
 
-        queue->cached_head = cached_head;
+        queue->cached_head = head;
 
-        if ((int32_t)(tail - (queue->cached_head + queue->mask)) > 0)
+        if (tail - head == queue->size)
         {
             return false;
         }
     }
 
-    queue->data[tail & queue->mask] = elem;
+    queue->data[tail & (queue->size - 1)] = elem;
     atomic_store_explicit(&queue->tail, tail + 1, memory_order_release);
 
     return true;
@@ -100,85 +98,97 @@ bool queue_enqueue(QUEUE* queue, uint64_t elem)
 
 bool queue_dequeue(QUEUE* queue, uint64_t* elem)
 {
-    // Read value of buffer head:
     uint32_t head = atomic_load_explicit(&queue->head, memory_order_relaxed);
 
     if (queue->cached_tail == head)
     {
-        uint32_t cached_tail = atomic_load_explicit(&queue->tail, memory_order_acquire);
-        queue->cached_tail = cached_tail;
+        uint32_t tail = atomic_load_explicit(&queue->tail, memory_order_acquire);
+        queue->cached_tail = tail;
 
-        if (cached_tail == head)
+        if (tail == head)
         {
             return false;
         }
     }
 
-    *elem = queue->data[head & queue->mask];
-    atomic_store_explicit(&queue->head, head + 1, memory_order_relaxed);
+    *elem = queue->data[head & (queue->size - 1)];
+    atomic_store_explicit(&queue->head, head + 1, memory_order_release);
 
     return true;
 }
 
 bool queue_enqueue_simple(QUEUE* queue, uint64_t elem)
 {
-    uint32_t head = atomic_load_explicit(&queue->head, memory_order_relaxed);
+    // [1] Извлекаем голову кольцевой очереди (синхронизация с [4]).
+    uint32_t head = atomic_load_explicit(&queue->head, memory_order_acquire);
 
+    // Извлекаем хвост кольцевой очереди.
     uint32_t tail = atomic_load_explicit(&queue->tail, memory_order_relaxed);
 
-    if ((int32_t)(tail - (head + queue->mask)) > 0)
-    {
+    if (tail - head == queue->size)
+    {   // Очередь полна.
+        // Добавление элемента в полную очередь невозможно.
         return false;
     }
 
-    queue->data[tail & queue->mask] = elem; // (1)
-    atomic_store_explicit(&queue->tail, tail + 1, memory_order_release); // (2)
+    // Добавляем элемент в очередь.
+    queue->data[tail & (queue->size - 1U)] = elem;
 
+    // [2] Уведомляем читателя о появлении нового элемента в очереди (см. [3]).
+    atomic_store_explicit(&queue->tail, tail + 1, memory_order_release);
+
+    // Добавление элемента в очередь прошло успешно.
     return true;
 }
 
 bool queue_dequeue_simple(QUEUE* queue, uint64_t* elem)
 {
+    // Считываем голову кольцевой очереди
     uint32_t head = atomic_load_explicit(&queue->head, memory_order_relaxed);
 
-    uint32_t tail = atomic_load_explicit(&queue->tail, memory_order_acquire); // (3)
+    // [3] Считываем хвост кольцевой очереди (см. [4]).
+    uint32_t tail = atomic_load_explicit(&queue->tail, memory_order_acquire);
     if (tail == head)
-    {
+    {   // Кольцевая очередь пуста.
         return false;
     }
 
-    *elem = queue->data[head & queue->mask]; // (4)
-    atomic_store_explicit(&queue->head, head + 1, memory_order_relaxed);
+    // Вычитываем элемент из очереди.
+    *elem = queue->data[head & (queue->size - 1U)];
 
+    // [4] Уведомляем писателя о появлении нового свободного места в очереди (см. [1]).
+    atomic_store_explicit(&queue->head, head + 1, memory_order_release);
+
+    // Извлечение элемента из очереди прошло успешно.
     return true;
 }
 
-//----------------
-// Benchmark code
-//----------------
+//------------------------------
+// Применение кольцевой очереди
+//------------------------------
 
 void thread_producer(QUEUE* queue)
 {
     for (uint64_t snd_i = 0U; snd_i < NUM_ITERATIONS; ++snd_i)
     {
-        // Put element in the queue:
-        bool success = queue_enqueue(queue, snd_i);
-        for (uint32_t retry = 0U; !success; retry++)
+        bool success = false;
+        uint32_t retry = 0U;
+        do
         {
-#if ENABLE_BACKOFF == 1
-            if (retry == NUM_RETRIES)
-            {
-                retry = 0U;
-                pthread_yield();
-            }
-#endif
-
 #if ENABLE_SIMPLE == 1
             success = queue_enqueue_simple(queue, snd_i);
 #else
             success = queue_enqueue(queue, snd_i);
 #endif
+            retry++;
+
+            if (ENABLE_BACKOFF && retry == NUM_RETRIES)
+            {
+                retry = 0U;
+                pthread_yield();
+            }
         }
+        while (!success);
     }
 }
 
@@ -188,24 +198,24 @@ void thread_consumer(QUEUE* queue)
     {
         uint64_t snd_i = 0U;
 
-        // Get element from the queue:
         bool success = false;
-        for (uint32_t retry = 0U; !success; retry++)
+        uint32_t retry = 0U;
+        do
         {
-#if ENABLE_BACKOFF == 1
-            if (retry == NUM_RETRIES)
-            {
-                retry = 0U;
-                pthread_yield();
-            }
-#endif
-
 #if ENABLE_SIMPLE == 1
             success = queue_dequeue_simple(queue, &snd_i);
 #else
             success = queue_dequeue(queue, &snd_i);
 #endif
+            retry++;
+
+            if (ENABLE_BACKOFF && retry == NUM_RETRIES)
+            {
+                retry = 0U;
+                pthread_yield();
+            }
         }
+        while (!success);
 
         // Compare result:
         if (snd_i != rcv_i)
@@ -216,9 +226,9 @@ void thread_consumer(QUEUE* queue)
     }
 }
 
-//------------------
-// Thread execution
-//------------------
+//-------------------------------
+// Совместное исполнение потоков
+//-------------------------------
 
 typedef struct {
     size_t thread_i;
@@ -241,9 +251,9 @@ void* thread_func(void* thread_args)
     return NULL;
 }
 
-//------------------
-// Thread benchmark
-//------------------
+//--------------------------------
+// Инициализация тестового стенда
+//--------------------------------
 
 #define NUM_THREADS 2U
 
@@ -253,11 +263,10 @@ typedef struct {
 
 int main()
 {
-    // Initialize queue:
     QUEUE queue;
     queue_init(&queue, QUEUE_SIZE);
 
-    // Initialize thread data:
+    // Инициализируем параметры потоков.
     THREAD_ARGS args[NUM_THREADS];
     for (size_t i = 0U; i < NUM_THREADS; ++i)
     {
@@ -265,11 +274,11 @@ int main()
         args[i].queue = &queue;
     }
 
-    // Spawn threads:
+    // Запуск потоков.
     THREAD_INFO thread_info[NUM_THREADS];
     for (size_t i = 0U; i < NUM_THREADS; ++i)
     {
-        // Initialize thread attributes:
+        // Инициализируем аттрибуты потока.
         pthread_attr_t thread_attributes;
         int ret = pthread_attr_init(&thread_attributes);
         if (ret != 0)
@@ -278,17 +287,19 @@ int main()
             exit(EXIT_FAILURE);
         }
 
-        // Assign hardware thread to posix thread:
+        // Назначаем аппаратные потоки для потоков POSIX.
         cpu_set_t assigned_harts;
         CPU_ZERO(&assigned_harts);
 
-        // Assumptions:
-        // - There are NUM_HARDWARE_THREADS hardware threads.
-        // - All harts from 0 to are present.
+        // Предположения о системе:
+        // - Система имеет NUM_HARDWARE_THREADS аппаратных потоков.
+        //   Это число возможно извлекать из системы напрямую
+        // - Все аппаратные потоки с 0 по NUM_HARDWARE_THREADS-1 активны.
+        //   Это требование может нарушаться при выходе из строя какого-нибудь из ядер процессора.
         size_t hart_i = i % NUM_HARDWARE_THREADS;
         CPU_SET(hart_i, &assigned_harts);
 
-        // Set thread affinity:
+        // Устанавливаем аффинность потока.
         ret = pthread_attr_setaffinity_np(&thread_attributes, sizeof(cpu_set_t), &assigned_harts);
         if (ret != 0)
         {
@@ -296,7 +307,7 @@ int main()
             exit(EXIT_FAILURE);
         }
 
-        // Create POSIX thread:
+        // Создаём потоки POSIX.
         ret = pthread_create(&thread_info[i].tid, &thread_attributes, thread_func, &args[i]);
         if (ret != 0)
         {
@@ -304,11 +315,11 @@ int main()
             exit(EXIT_FAILURE);
         }
 
-        // Destroy thread attribute object:
+        // Удаляем объект с аттрибутами потока.
         pthread_attr_destroy(&thread_attributes);
     }
 
-    // Wait for all threads to finish execution:
+    // Ждём, пока все потоки закончат выполнение.
     for (size_t i = 0; i < NUM_THREADS; ++i)
     {
         int ret = pthread_join(thread_info[i].tid, NULL);

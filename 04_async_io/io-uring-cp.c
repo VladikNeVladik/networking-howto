@@ -1,21 +1,21 @@
-// No copyright. 2024, Vladislav Aleinik
-
+// Copyright 2025, Vladislav Aleinik
 #include "common.h"
 
 #include <memory.h>
 #include <liburing.h>
 
-//===========================
-// Copy procedure parameters
-//===========================
+//=================================
+// Параметры процедуры копирования
+//=================================
 
-#define READ_BLOCK_SIZE 8192U
-#define QUEUE_SIZE 64U
+#define READ_BLOCK_SIZE 4096U
+#define QUEUE_SIZE 16U
 
-//================
-// Copying status
-//================
+//====================
+// Статус копирования
+//====================
 
+// Состояние одного копируемого блока данных.
 typedef enum {
     BLOCK_IDLE     = 0,
     BLOCK_IN_READ  = 1,
@@ -30,6 +30,7 @@ struct BlockStatus
     uint32_t size;
 };
 
+// Состояние процесса копиования файла.
 struct CopyStatus
 {
     int src_fd;
@@ -64,7 +65,7 @@ void init_copying_status(struct CopyStatus* status, uint32_t src_size, int src_f
         status->block_statuses[i].size   = 0;
     }
 
-    // Initialize IO-userspace-ring:
+    // Инициализируем кольцевой буфер адресном в пространстве пользователя.
     int init_ret = io_uring_queue_init(QUEUE_SIZE, &status->io_ring, 0U);
     if (init_ret != 0)
     {
@@ -72,7 +73,7 @@ void init_copying_status(struct CopyStatus* status, uint32_t src_size, int src_f
         exit(EXIT_FAILURE);
     }
 
-    // Create buffers to store intermediate data:
+    // Аллоцируем буферы для хранения промежуточных данных.
     status->aligned_buffers = (char*) aligned_alloc(READ_BLOCK_SIZE, QUEUE_SIZE * READ_BLOCK_SIZE);
 
     status->fixed_buffers = calloc(QUEUE_SIZE, sizeof(struct iovec));
@@ -83,6 +84,7 @@ void init_copying_status(struct CopyStatus* status, uint32_t src_size, int src_f
         status->fixed_buffers[i].iov_len  = READ_BLOCK_SIZE;
     }
 
+    // Оповещаем ядро о расположении буферов.
     if (io_uring_register_buffers(&status->io_ring, status->fixed_buffers, QUEUE_SIZE) != 0)
     {
         printf("Unable to register intermediate buffers: errno=%i (%s)", errno, strerror(errno));
@@ -96,9 +98,9 @@ void free_copying_status(struct CopyStatus* status)
     free(status->fixed_buffers);
 }
 
-//=====================
-// Basic IO operations
-//=====================
+//=======================
+// Процедура копирования
+//=======================
 
 void prepare_read_request(struct CopyStatus* status, unsigned cell)
 {
@@ -110,12 +112,12 @@ void prepare_read_request(struct CopyStatus* status, unsigned cell)
         return;
     }
 
-    // Get the block to transfer:
+    // Извлекаем информаци о текущем блоке.
     block->stage  = BLOCK_IN_READ;
     block->offset = status->src_off;
     block->size   = (bytes_left < READ_BLOCK_SIZE)? bytes_left : READ_BLOCK_SIZE;
 
-    // Enqueue read request:
+    // Формируем запрос на чтение.
     struct io_uring_sqe* read_sqe = io_uring_get_sqe(&status->io_ring);
 
     io_uring_prep_read_fixed(read_sqe, status->src_fd,
@@ -124,7 +126,7 @@ void prepare_read_request(struct CopyStatus* status, unsigned cell)
 
     read_sqe->user_data = cell;
 
-    // Update transfer status:
+    // Обновляем состояни передачи.
     status->src_off += block->size;
     status->num_block_in_progress += 1;
 
@@ -137,14 +139,14 @@ void prepare_write_request(struct CopyStatus* status, unsigned cell)
 
     block->stage = BLOCK_IN_WRITE;
 
-    // Enqueue write request:
+    // Формируем запрос на запись.
     struct io_uring_sqe* write_sqe = io_uring_get_sqe(&status->io_ring);
 
     io_uring_prep_write_fixed(write_sqe, status->dst_fd,
                               status->fixed_buffers[cell].iov_base,
                               READ_BLOCK_SIZE, block->offset, cell);
 
-    // Update transfer status:
+    // Обновляем состояни передачи.
     write_sqe->user_data = cell;
 
     // printf("Cell#%02d: write (off=%lu, size=%u)\n", cell, block->offset, block->size);
@@ -156,15 +158,15 @@ void finish_write_request(struct CopyStatus* status, unsigned cell)
 
     block->stage = BLOCK_IDLE;
 
-    // Update transfer status:
+    // Обновляем состояни передачи.
     status->num_block_in_progress -= 1;
 
     // printf("Cell#%02d is IDLE\n", cell);
 }
 
-//=====================
-// Main copy procedure
-//=====================
+//=======================
+// Процедура копирования
+//=======================
 
 #define MAX(a, b) ((a) > (b)? (a) : (b))
 
@@ -172,31 +174,28 @@ int main(int argc, char* argv[])
 {
     if (argc != 3)
     {
-        fprintf(stderr, "Usage: sync-cp <src> <dst>");
+        fprintf(stderr, "Usage: io-uring-cp <src> <dst>");
         exit(EXIT_FAILURE);
     }
 
-    // Open source file and determine it's size:
+    // Открываем исходный файл и определяем его размер.
     int src_fd;
     uint32_t src_size;
     open_src_file(argv[1], &src_fd, &src_size);
 
-    // Create the destination file and allocate space on the disk:
+    // Открываем результирующий файл и аллоцируем место на диске.
     int dst_fd;
     open_dst_file(argv[2], &dst_fd, src_size);
 
-    //===============================
-    // Allocate intermediate buffers
-    //===============================
-
+    // Производим инициализацию копирования.
     struct CopyStatus status;
     init_copying_status(&status, src_size, src_fd, dst_fd);
 
-    //=====================
-    // Actual file copying
-    //=====================
+    //===================
+    // Копирование файла
+    //===================
 
-    // Use all idle cells for reads:
+    // Запускаем первоначальные запросы на чтение.
     for (uint32_t cell_i = 0; cell_i < QUEUE_SIZE; ++cell_i)
     {
         prepare_read_request(&status, cell_i);
@@ -204,7 +203,7 @@ int main(int argc, char* argv[])
 
     while (status.src_off != status.src_size || status.num_block_in_progress != 0)
     {
-        // Submit all unsubmitted reqs:
+        // Разом передаём все имеющиеся запросы.
         io_uring_submit_and_wait(&status.io_ring, 1U);
 
         int64_t cell_i = -1;
@@ -243,15 +242,12 @@ int main(int argc, char* argv[])
         while (cell_i != -1);
     }
 
-    // Deallocate resources:
+    // Освобождаем выделенные ресурсы.
     io_uring_queue_exit(&status.io_ring);
 
     free_copying_status(&status);
 
-    //============================
-    // End of actual file copying
-    //============================
-
+    // Закрываем файлы.
     close_src_dst_files(argv[1], src_fd, src_size, argv[2], dst_fd);
 
     return EXIT_SUCCESS;

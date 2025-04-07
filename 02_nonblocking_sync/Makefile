@@ -1,4 +1,4 @@
-# No copyright. Vladislav Alenik, 2024
+# Copyright Vladislav Aleinik, 2025
 
 #-----------------------
 # Compiler/linker flags

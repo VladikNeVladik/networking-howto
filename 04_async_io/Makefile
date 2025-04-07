@@ -1,4 +1,4 @@
-# No copyright. Vladislav Alenik, 2024
+# Copyright Vladislav Aleinik, 2025
 
 #-------
 # Files
@@ -23,7 +23,7 @@ default: $(EXECUTABLE)
 LIBURING_LIB_DIR = $(abspath liburing/src/)
 LIBURING_INCLUDE = $(abspath liburing/src/include)
 
-LIBURING_SO = $(LIBURING_LIB_DIR)/liburing.so.2.6
+LIBURING_SO = $(LIBURING_LIB_DIR)/liburing.so.2.10
 
 LINK_TO_LIBURING = -L$(LIBURING_LIB_DIR) -Wl,-rpath=$(LIBURING_LIB_DIR) -luring
 
@@ -42,7 +42,6 @@ LINK_TO_LIBAIO = -L$(LIBAIO_LIB_DIR) -Wl,-rpath=$(LIBAIO_LIB_DIR) -laio
 
 $(LIBAIO_SO):
 	-git clone https://github.com/crossbuild/libaio.git
-	cd libaio && ./configure
 	cd libaio && $(MAKE)
 
 #-----------------------

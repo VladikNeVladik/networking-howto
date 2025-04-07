@@ -1,26 +1,22 @@
-// No copyright. 2024, Vladislav Aleinik
-
+// Copyright 2025, Vladislav Aleinik
 #include "common.h"
 
-// Aligned memory allocation:
 #include <memory.h>
 
-// CPU_SET macros:
 #include <sched.h>
-// Threads:
 #include <pthread.h>
 
-//===========================
-// Copy procedure parameters
-//===========================
+//=================================
+// Параметры процедуры копирования
+//=================================
 
-#define NUM_THREADS             8U
+#define NUM_THREADS             2U
 #define NUM_HARDWARE_THREADS    1U
-#define READ_BLOCK_SIZE         512U
+#define READ_BLOCK_SIZE         4096U
 
-//============================
-// Thread function aprameters
-//============================
+//========================================
+// Организация многопоточного копирования
+//========================================
 
 typedef struct {
     size_t thread_i;
@@ -38,18 +34,20 @@ void* thread_func(void* thread_args)
 {
     THREAD_ARGS* args = (THREAD_ARGS*) thread_args;
 
-    //=====================
-    // Actual file copying
-    //=====================
+    //===================
+    // Копирование файла
+    //===================
 
     for (uint32_t i = 0U; i < args->src_size;)
     {
+        // Вычисление сдвига в файле.
         size_t offset = i + args->thread_i * READ_BLOCK_SIZE;
         if (offset > args->src_size)
         {
             break;
         }
 
+        // Чтение данных в буфер.
         ssize_t bytes_read = pread(args->src_fd, args->buffer, READ_BLOCK_SIZE, offset);
         if (bytes_read == -1)
         {
@@ -57,6 +55,7 @@ void* thread_func(void* thread_args)
             exit(EXIT_FAILURE);
         }
 
+        // Запись данных из буфера.
         ssize_t bytes_written = pwrite(args->dst_fd, args->buffer, bytes_read, offset);
         if (bytes_written == -1 || bytes_written != bytes_read)
         {
@@ -74,9 +73,9 @@ void* thread_func(void* thread_args)
     return NULL;
 }
 
-//=====================
-// Main copy procedure
-//=====================
+//=======================
+// Процедура копирования
+//=======================
 
 int main(int argc, char* argv[])
 {
@@ -86,19 +85,16 @@ int main(int argc, char* argv[])
         exit(EXIT_FAILURE);
     }
 
-    // Open source file and determine it's size:
+    // Открываем исходный файл и определяем его размер.
     int src_fd;
     uint32_t src_size;
     open_src_file(argv[1], &src_fd, &src_size);
 
-    // Create the destination file and allocate space on the disk:
+    // Открываем результирующий файл и аллоцируем место на диске.
     int dst_fd;
     open_dst_file(argv[2], &dst_fd, src_size);
 
-    //===============================
-    // Allocate intermediate buffers
-    //===============================
-
+    // Выделяем память для промежуточного буфера.
     uint8_t* buffer = (uint8_t*) aligned_alloc(READ_BLOCK_SIZE, READ_BLOCK_SIZE * NUM_THREADS);
     if (buffer == NULL)
     {
@@ -106,11 +102,11 @@ int main(int argc, char* argv[])
         exit(EXIT_FAILURE);
     }
 
-    //====================
-    // Create thread pool
-    //====================
+    //=======================
+    // Создание пула потоков
+    //=======================
 
-    // Initialize thread data:
+    // Инициализируем данные потоков.
     THREAD_ARGS args[NUM_THREADS];
     for (size_t i = 0U; i < NUM_THREADS; ++i)
     {
@@ -121,11 +117,11 @@ int main(int argc, char* argv[])
         args[i].dst_fd   = dst_fd;
     }
 
-    // Spawn threads:
+    // Запуск потоков.
     THREAD_INFO thread_info[NUM_THREADS];
     for (size_t i = 0U; i < NUM_THREADS; ++i)
     {
-        // Initialize thread attributes:
+        // Инициализируем аттрибуты потока.
         pthread_attr_t thread_attributes;
         int ret = pthread_attr_init(&thread_attributes);
         if (ret != 0)
@@ -134,17 +130,19 @@ int main(int argc, char* argv[])
             exit(EXIT_FAILURE);
         }
 
-        // Assign hardware thread to posix thread:
+        // Назначаем аппаратные потоки для потоков POSIX.
         cpu_set_t assigned_harts;
         CPU_ZERO(&assigned_harts);
 
-        // Assumptions:
-        // - There are NUM_HARDWARE_THREAD hardware threads.
-        // - All harts from 0 to are present.
+        // Предположения о системе:
+        // - Система имеет NUM_HARDWARE_THREAD аппаратных потоков.
+        //   Это число возможно извлекать из системы напрямую
+        // - Все аппаратные потоки с 0 по NUM_HARDWARE_THREAD-1 активны.
+        //   Это требование может нарушаться при выходе из строя какого-нибудь из ядер процессора.
         size_t hart_i = i % NUM_HARDWARE_THREADS;
         CPU_SET(hart_i, &assigned_harts);
 
-        // Set thread affinity:
+        // Устанавливаем аффинность потока.
         ret = pthread_attr_setaffinity_np(&thread_attributes, sizeof(cpu_set_t), &assigned_harts);
         if (ret != 0)
         {
@@ -152,7 +150,7 @@ int main(int argc, char* argv[])
             exit(EXIT_FAILURE);
         }
 
-        // Create POSIX thread:
+        // Создаём потоки POSIX.
         ret = pthread_create(&thread_info[i].tid, &thread_attributes, thread_func, &args[i]);
         if (ret != 0)
         {
@@ -160,11 +158,11 @@ int main(int argc, char* argv[])
             exit(EXIT_FAILURE);
         }
 
-        // Destroy thread attribute object:
+        // Удаляем объект с аттрибутами потока.
         pthread_attr_destroy(&thread_attributes);
     }
 
-    // Wait for all threads to finish execution:
+    // Ждём, пока все потоки закончат выполнение.
     for (size_t i = 0; i < NUM_THREADS; ++i)
     {
         int ret = pthread_join(thread_info[i].tid, NULL);
@@ -175,10 +173,7 @@ int main(int argc, char* argv[])
         }
     }
 
-    //============================
-    // End of actual file copying
-    //============================
-
+    // Закрываем файлы.
     close_src_dst_files(argv[1], src_fd, src_size, argv[2], dst_fd);
 
     return EXIT_SUCCESS;

@@ -1,4 +1,4 @@
-// No copyright. 2024, Vladislav Aleinik
+// Copyright 2025, Vladislav Aleinik
 #ifndef MSUSEM_ASYNC_IO
 #define MSUSEM_ASYNC_IO
 
@@ -17,12 +17,14 @@
 #include <unistd.h>
 #include <fcntl.h>
 
-//=================
-// File operations
-//=================
+//======================
+// Операции над файлами
+//======================
 
 void open_src_file(const char* filename, int* fd, uint32_t* file_size)
 {
+    // Открываем файл на чтение.
+    // Флаг O_DIRECT обозначает чтение запись непосредственно из буферов user-space.
     *fd = open(filename, O_RDONLY|O_DIRECT);
     if (*fd == -1)
     {
@@ -31,6 +33,7 @@ void open_src_file(const char* filename, int* fd, uint32_t* file_size)
         exit(EXIT_FAILURE);
     }
 
+    // Запрашиваем у ФС размер файла.
     struct stat statbuf;
     if (fstat(*fd, &statbuf) == -1)
     {
@@ -44,6 +47,7 @@ void open_src_file(const char* filename, int* fd, uint32_t* file_size)
 
 void open_dst_file(const char* filename, int* fd, uint32_t src_size)
 {
+    // Открываем файл на запись.
     *fd = open(filename, O_WRONLY|O_CREAT|O_TRUNC, 0644);
     if (*fd == -1)
     {
@@ -52,6 +56,8 @@ void open_dst_file(const char* filename, int* fd, uint32_t src_size)
         exit(EXIT_FAILURE);
     }
 
+    // Просим ОС превентивно выделить память под файл.
+    // Это позволяет избавиться итеративного довыделения памяти в процессе копирования.
     if (fallocate(*fd, 0, 0, src_size) == -1)
     {
         fprintf(stderr, "Not enough space for file '%s': errno=%i (%s)",
@@ -64,7 +70,8 @@ void close_src_dst_files(
     const char* src_filename, int src_fd, uint32_t src_size,
     const char* dst_filename, int dst_fd)
 {
-    // Truncate file to specified size:
+    // Отрезаем файл до необходимого размера.
+    // Это необходимо, т.к. размер файла не кратен размеру блока записи.
     if (ftruncate(dst_fd, src_size) == -1)
     {
         fprintf(stderr, "Unable to truncate file '%s': errno=%i (%s)",
@@ -72,7 +79,7 @@ void close_src_dst_files(
         exit(EXIT_FAILURE);
     }
 
-    // Ensure destination file reached disk (kind of):
+    // Убеждаемся, что файл записан на диск.
     if (fsync(dst_fd) == -1)
     {
         fprintf(stderr, "Unable to sync file '%s': errno=%i (%s)",
@@ -80,7 +87,7 @@ void close_src_dst_files(
         exit(EXIT_FAILURE);
     }
 
-    // Close opened files:
+    // Закрываем файлы.
     if (close(src_fd) == -1)
     {
         fprintf(stderr, "Unable to close file '%s': errno=%i (%s)",

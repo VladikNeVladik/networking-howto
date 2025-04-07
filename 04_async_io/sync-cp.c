@@ -1,18 +1,17 @@
-// No copyright. 2024, Vladislav Aleinik
-
+// Copyright 2025, Vladislav Aleinik
 #include "common.h"
 
 #include <memory.h>
 
-//===========================
-// Copy procedure parameters
-//===========================
+//=================================
+// Параметры процедуры копирования
+//=================================
 
-#define READ_BLOCK_SIZE 512U
+#define READ_BLOCK_SIZE 4096U
 
-//=====================
-// Main copy procedure
-//=====================
+//=======================
+// Процедура копирования
+//=======================
 
 int main(int argc, char* argv[])
 {
@@ -22,19 +21,16 @@ int main(int argc, char* argv[])
         exit(EXIT_FAILURE);
     }
 
-    // Open source file and determine it's size:
+    // Открываем исходный файл и определяем его размер.
     int src_fd;
     uint32_t src_size;
     open_src_file(argv[1], &src_fd, &src_size);
 
-    // Create the destination file and allocate space on the disk:
+    // Открываем результирующий файл и аллоцируем место на диске.
     int dst_fd;
     open_dst_file(argv[2], &dst_fd, src_size);
 
-    //==============================
-    // Allocate intermediate buffer
-    //==============================
-
+    // Выделяем память для промежуточного буфера.
     uint8_t* buffer = (uint8_t*) aligned_alloc(READ_BLOCK_SIZE, READ_BLOCK_SIZE);
     if (buffer == NULL)
     {
@@ -42,12 +38,13 @@ int main(int argc, char* argv[])
         exit(EXIT_FAILURE);
     }
 
-    //=====================
-    // Actual file copying
-    //=====================
+    //===================
+    // Копирование файла
+    //===================
 
     for (uint32_t i = 0U; i < src_size;)
     {
+        // Производим чтение в буфер.
         ssize_t bytes_read = read(src_fd, buffer, READ_BLOCK_SIZE);
         if (bytes_read == -1)
         {
@@ -55,6 +52,7 @@ int main(int argc, char* argv[])
             exit(EXIT_FAILURE);
         }
 
+        // Производим запись из буфера.
         ssize_t bytes_written = write(dst_fd, buffer, bytes_read);
         if (bytes_written == -1 || bytes_written != bytes_read)
         {
@@ -69,10 +67,7 @@ int main(int argc, char* argv[])
         }
     }
 
-    //============================
-    // End of actual file copying
-    //============================
-
+    // Закрываем файлы.
     close_src_dst_files(argv[1], src_fd, src_size, argv[2], dst_fd);
 
     return EXIT_SUCCESS;

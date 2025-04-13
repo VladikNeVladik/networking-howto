@@ -77,7 +77,7 @@ build/%: %.c
 	$(CC) $< $(CFLAGS) -o $@ $(LDFLAGS)
 
 run: $(EXECUTABLE) $(DUMMY_SRC)
-	@./$(EXECUTABLE) $(DUMMY_SRC) 2
+	@./$(EXECUTABLE) $(DUMMY_SRC) 3
 
 # Timing command usage:
 TIME_CMD    = /usr/bin/time
@@ -85,7 +85,7 @@ TIME_FORMAT = \
 	"CPU Percentage: %P\nReal time: %e sec\nUser time: %U sec"
 
 time: $(EXECUTABLE) $(DUMMY_SRC)
-	@$(TIME_CMD) --quiet --format=$(TIME_FORMAT) $(EXECUTABLE) $(DUMMY_SRC) 2 | cat
+	@$(TIME_CMD) --quiet --format=$(TIME_FORMAT) $(EXECUTABLE) $(DUMMY_SRC) 3 | cat
 
 #---------------
 # Miscellaneous

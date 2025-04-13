@@ -1,5 +1,6 @@
 // Сopyright Vladislav Aleinik, 2025
 #define _DEFAULT_SOURCE
+#define _GNU_SOURCE
 
 #include <stdlib.h>
 #include <stdio.h>
@@ -182,6 +183,14 @@ void server_init_listen_socket(FILESHARE_SERVER* server)
         exit(EXIT_FAILURE);
     }
 
+    // Запрещаем перевод слушающего сокета в состояние TIME_WAIT.
+    int setsockopt_yes = 1;
+    if (setsockopt(server->listen_sock_fd, SOL_SOCKET, SO_REUSEADDR, &setsockopt_yes, sizeof(setsockopt_yes)) == -1)
+    {
+        fprintf(stderr, "[server_init_listen_socket] Unable to set SO_REUSEADDR socket option\n");
+        exit(EXIT_FAILURE);
+    }
+
     // Формируем адрес для прослушивания запросов на подключение.
     struct sockaddr_in listen_addr;
     listen_addr.sin_family      = AF_INET;           // Семейство запращиваемого адреса: IPv4-адрес.
@@ -191,33 +200,6 @@ void server_init_listen_socket(FILESHARE_SERVER* server)
     if (bind(server->listen_sock_fd, (struct sockaddr*) &listen_addr, sizeof(listen_addr)) == -1)
     {
         fprintf(stderr, "[server_init_listen_socket] Unable to bind\n");
-        exit(EXIT_FAILURE);
-    }
-
-    // Запрещаем перевод сокета в состояние TIME_WAIT.
-    int setsockopt_yes = 1;
-    if (setsockopt(server->listen_sock_fd, SOL_SOCKET, SO_REUSEADDR, &setsockopt_yes, sizeof(setsockopt_yes)) == -1)
-    {
-        fprintf(stderr, "[server_init_listen_socket] Unable to set SO_REUSEADDR socket option\n");
-        exit(EXIT_FAILURE);
-    }
-
-    // Запрещеаем ещё один механизм "зависания сокета".
-    struct linger linger_params =
-    {
-        .l_onoff  = 1,
-        .l_linger = 0
-    };
-    if (setsockopt(server->listen_sock_fd, SOL_SOCKET, SO_LINGER, &linger_params, sizeof(linger_params)) == -1)
-    {
-        fprintf(stderr, "[server_init_listen_socket] Unable to disable SO_LINGER socket option");
-        exit(EXIT_FAILURE);
-    }
-
-    int setsockopt_arg = 0;
-    if (setsockopt(server->listen_sock_fd, IPPROTO_TCP, TCP_LINGER2, &setsockopt_arg, sizeof(setsockopt_arg)) == -1)
-    {
-        fprintf(stderr, "[server_init_listen_socket] Unable to disable TCP_LINGER2 socket option");
         exit(EXIT_FAILURE);
     }
 
@@ -252,6 +234,18 @@ bool server_accept_connection_request(FILESHARE_SERVER* server, FILESHARE_CONNEC
         }
 
         fprintf(stderr, "[server_accept_connection_request] Unable to accept() connection on a socket\n");
+        exit(EXIT_FAILURE);
+    }
+
+    // Разрешаем "зависания сокета" для доотправки данных.
+    struct linger linger_params =
+    {
+        .l_onoff  = 1,
+        .l_linger = 1
+    };
+    if (setsockopt(server->listen_sock_fd, SOL_SOCKET, SO_LINGER, &linger_params, sizeof(linger_params)) == -1)
+    {
+        fprintf(stderr, "[server_init_listen_socket] Unable to disable SO_LINGER socket option");
         exit(EXIT_FAILURE);
     }
 

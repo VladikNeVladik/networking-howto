@@ -162,7 +162,7 @@ bool client_recv_file_size(FILESHARE_CLIENT* client)
 {
     uint64_t file_size = 0U;
 
-    size_t bytes_read = recv(client->server_conn_fd, &file_size, sizeof(file_size), 0U);
+    size_t bytes_read = recv(client->server_conn_fd, &file_size, sizeof(file_size), MSG_WAITALL);
     if (bytes_read != sizeof(file_size))
     {
         fprintf(stderr, "Unable to recv file size from server\n");

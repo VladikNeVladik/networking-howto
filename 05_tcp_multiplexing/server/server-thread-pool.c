@@ -88,7 +88,7 @@ int main(int argc, char** argv)
     THREAD_ARGS* args = calloc(num_clients, sizeof(THREAD_ARGS));
     if (args == NULL)
     {
-        fprintf(stderr, "Unable to thread arguments\n");
+        fprintf(stderr, "Unable to allocate thread arguments\n");
         exit(EXIT_FAILURE);
     }
 

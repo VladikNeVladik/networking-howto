@@ -72,6 +72,18 @@ build/%: %.c
 run: $(EXECUTABLE)
 	@./$(EXECUTABLE) $(DUMMY_DST)
 
+run10: $(EXECUTABLE)
+	@./$(EXECUTABLE) build/dummy_dst0 &
+	@./$(EXECUTABLE) build/dummy_dst1 &
+	@./$(EXECUTABLE) build/dummy_dst2 &
+	@./$(EXECUTABLE) build/dummy_dst3 &
+	@./$(EXECUTABLE) build/dummy_dst4 &
+	@./$(EXECUTABLE) build/dummy_dst5 &
+	@./$(EXECUTABLE) build/dummy_dst6 &
+	@./$(EXECUTABLE) build/dummy_dst7 &
+	@./$(EXECUTABLE) build/dummy_dst8 &
+	@./$(EXECUTABLE) build/dummy_dst9 &
+
 # Timing command usage:
 TIME_CMD    = /usr/bin/time
 TIME_FORMAT = \

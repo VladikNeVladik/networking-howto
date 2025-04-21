@@ -20,9 +20,9 @@
 #include <endian.h>
 #include <arpa/inet.h>
 
-//================
-// Данные сервера
-//================
+//==================
+// Структуры данных
+//==================
 
 typedef struct
 {
@@ -35,30 +35,22 @@ typedef struct
     int listen_sock_fd;
 } FILESHARE_SERVER;
 
-//=============================
-// Обработка одного соединения
-//=============================
-
 #define TRANSFER_BLOCK_SIZE 1024U
 
 // Состояние передачи отдельного клиента.
 typedef enum
 {
     CONNECTION_EMPTY,       // (1) Соединение с данным клиентом не установлено.
-    CONNECTION_INITIALIZED, // (2) Соединение с клиентом установлено, данные не передавались.
-    SEND_FILE_SIZE,         // (3) Сервер передал клиенту размер файла.
-    READ_DATA_BLOCK,        // (4) Сервер считал с диска очередной блок данных.
-    WRITE_DATA_TO_SOCKET,   // (5) Сервер передал клиенту очередной блок данных.
-    TRANSFER_FINISHED       // (6) Сервер передал клиенту все блоки данных.
+    SEND_FILE_SIZE,         // (2) Сервер готовится передать клиенту размер файла.
+    SEND_DATA_BLOCK,        // (3) Сервер готовится передать клиенту очередной блок данных.
+    TRANSFER_FINISHED       // (4) Сервер передал клиенту все блоки данных.
 } TRANSFER_STATE;
 
 // Условия переходов между состояниями:
 // (1) -> (2) - Слушающий сокет получил очередной запрос на подключение от клиента.
 // (2) -> (3) - Была возможна запись в сетевое соединие.
-// (3) -> (4) - Было возможно чтение из файла.
-// (4) -> (5) - Была возможна запись в сетевое соединие.
-// (5) -> (4) - клиенту передан ещё не весь файл, было возможно чтение из файла.
-// (5) -> (6) - клиенту передан весь файл.
+// (3) -> (3) - Клиенту передан ещё не весь файл, была возможна запись в сетевое соединие.
+// (3) -> (4) - Клиенту передан весь файл.
 
 typedef struct
 {
@@ -67,12 +59,13 @@ typedef struct
     // Сдвиг в файле для текущего копирования.
     size_t src_file_offset;
 
-    // Указатель на массив данных клиента.
-    uint8_t* buffer;
     // Текущее состояние протокола обмена данными с данным клиентом.
     TRANSFER_STATE state;
-
 } FILESHARE_CONNECTION;
+
+//=============================
+// Обработка одного соединения
+//=============================
 
 bool server_send_file_size(const FILESHARE_SERVER* server, FILESHARE_CONNECTION* conn)
 {
@@ -81,40 +74,60 @@ bool server_send_file_size(const FILESHARE_SERVER* server, FILESHARE_CONNECTION*
     size_t bytes_written = write(conn->client_sock_fd, &file_size, sizeof(file_size));
     if (bytes_written != sizeof(file_size))
     {
+        if (errno == EAGAIN)
+        {
+            // Не обновляем состояние соединения.
+            return true;
+        }
+
         fprintf(stderr, "Unable to send file size to client\n");
+        // Переключаем состояние соединения.
+        conn->state = TRANSFER_FINISHED;
         return false;
     }
 
     // Будем копировать файл с нулевой позиции.
     conn->src_file_offset = 0U;
-
-    return true;
-}
-
-bool server_read_file_block(const FILESHARE_SERVER* server, FILESHARE_CONNECTION* conn)
-{
-    size_t bytes_read = pread(server->src_file_fd, file_block, TRANSFER_BLOCK_SIZE, conn->src_file_offset);
-    if (bytes_read == 0 && conn->src_file_offset != server->src_file_size)
-    {
-        fprintf(stderr, "Unable to read data from file\n");
-        return false;
-    }
+    // Переключаем состояние соединения.
+    conn->state = SEND_DATA_BLOCK;
 
     return true;
 }
 
 bool server_send_file_block(const FILESHARE_SERVER* server, FILESHARE_CONNECTION* conn)
 {
+    char file_block[TRANSFER_BLOCK_SIZE];
+
+    size_t bytes_read = pread(server->src_file_fd, file_block, TRANSFER_BLOCK_SIZE, conn->src_file_offset);
+    if (bytes_read == (size_t) -1 ||
+        (bytes_read == 0 && conn->src_file_offset != server->src_file_size))
+    {
+        fprintf(stderr, "Unable to read data from file\n");
+        // Переключаем состояние соединения.
+        conn->state = TRANSFER_FINISHED;
+        return false;
+    }
+
     size_t bytes_written = write(conn->client_sock_fd, file_block, bytes_read);
-    if (bytes_written != bytes_read)
+    if (bytes_written == (size_t) -1 || bytes_written != bytes_read)
     {
         fprintf(stderr, "Unable to send data block to client\n");
+        // Переключаем состояние соединения.
+        conn->state = TRANSFER_FINISHED;
         return false;
     }
 
     // Обновляем текущий сдвиг в файле.
     conn->src_file_offset += bytes_written;
+    // Переключаем состояние соединения.
+    if (conn->src_file_offset == server->src_file_size)
+    {
+        // Переключаем состояние соединения.
+        conn->state = TRANSFER_FINISHED;
+        return false;
+    }
 
+    // Не обновляем состояние соединения.
     return true;
 }
 
@@ -125,7 +138,7 @@ bool server_send_file_block(const FILESHARE_SERVER* server, FILESHARE_CONNECTION
 void server_open_src_file(FILESHARE_SERVER* server, const char* filename)
 {
     // Открываем файл на чтение.
-    server->src_file_fd = open(filename, O_RDONLY | O_NONBLOCK);
+    server->src_file_fd = open(filename, O_RDONLY);
     if (server->src_file_fd == -1)
     {
         fprintf(stderr, "Unable to open source file '%s': errno=%i (%s)\n",

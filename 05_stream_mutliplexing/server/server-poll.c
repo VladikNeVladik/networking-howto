@@ -11,37 +11,40 @@
 // Организация синхронного мультиплексирования при помощи poll
 //=============================================================
 
-void poll_wait_for_client(struct pollfd* pollfds, nfds_t* num_pollfds, FILESHARE_SERVER* server)
+void poll_server_wait_for_client(struct pollfd* pollfds, FILESHARE_SERVER* server)
 {
-    struct pollfd* pollfd = &pollfds[*num_pollfds];
+    struct pollfd* pollfd = &pollfds[0U];
 
     pollfd->fd      = server->listen_sock_fd;
     pollfd->events  = POLLIN;
     pollfd->revents = 0U;
-
-    *num_pollfds += 1U;
 }
 
-void poll_wait_for_data(struct pollfd* pollfds, nfds_t* num_pollfds, FILESHARE_SERVER* server)
+void poll_server_do_not_wait_for_client(struct pollfd* pollfds)
 {
-    struct pollfd* pollfd = &pollfds[*num_pollfds];
+    struct pollfd* pollfd = &pollfds[0U];
 
-    pollfd->fd      = server->src_file_fd;
-    pollfd->events  = POLLIN;
+    pollfd->fd      = -1;
+    pollfd->events  = 0U;
     pollfd->revents = 0U;
-
-    *num_pollfds += 1U;
 }
 
-void poll_wait_on_connection(struct pollfd* pollfds, nfds_t* num_pollfds, FILESHARE_CONNECTION* conn)
+void poll_conn_wait_on_socket(struct pollfd* pollfds, size_t conn_i, FILESHARE_CONNECTION* conn)
 {
-    struct pollfd* pollfd = &pollfds[*num_pollfds];
+    struct pollfd* pollfd = &pollfds[1 + conn_i];
 
     pollfd->fd      = conn->client_sock_fd;
     pollfd->events  = POLLOUT|POLLHUP;
     pollfd->revents = 0U;
+}
 
-    *num_pollfds += 1U;
+void poll_conn_do_not_wait_on_socket(struct pollfd* pollfds, size_t conn_i)
+{
+    struct pollfd* pollfd = &pollfds[1 + conn_i];
+
+    pollfd->fd      = -1;
+    pollfd->events  = 0U;
+    pollfd->revents = 0U;
 }
 
 //============================
@@ -57,7 +60,7 @@ int main(int argc, char** argv)
     }
 
     char* endptr = argv[2];
-    long max_conns = strtol(argv[2], &endptr, 10);
+    size_t max_conns = (size_t) strtol(argv[2], &endptr, 10);
     if (*argv[2] == '\0' || *endptr != '\0' || max_conns <= 0)
     {
         fprintf(stderr, "Unable to parse number of clients!\n");
@@ -67,14 +70,6 @@ int main(int argc, char** argv)
     // Структура данных с представлением сервера.
     FILESHARE_SERVER server;
 
-    // Аллоцируем буферы данных соединений.
-    uint8_t* buffer = calloc(max_conns, TRANSFER_BLOCK_SIZE);
-    if (buffer == NULL)
-    {
-        fprintf(stderr, "Unable to allocate connection buffers\n");
-        exit(EXIT_FAILURE);
-    }
-
     // Инициализируем соединия с клиентами.
     FILESHARE_CONNECTION* conns = calloc(max_conns, sizeof(FILESHARE_CONNECTION));
     if (conns == NULL)
@@ -83,9 +78,8 @@ int main(int argc, char** argv)
         exit(EXIT_FAILURE);
     }
 
-    for (long conn_i = 0U; conn_i < max_conns; conn_i++)
+    for (size_t conn_i = 0U; conn_i < max_conns; conn_i++)
     {
-        conns[conn_i].buffer = &buffer[TRANSFER_BLOCK_SIZE * conn_i];
         conns[conn_i].state  = CONNECTION_EMPTY;
     }
 
@@ -116,9 +110,6 @@ int main(int argc, char** argv)
 
     while (true)
     {
-        // Условие выхода из цикла.
-        bool exit_condition = false;
-
         // Запрет на обработку соединений от новых клиентов.
         bool accept_new_connections = num_connected_clients != max_conns && !program_in_shutdown();
 
@@ -128,30 +119,94 @@ int main(int argc, char** argv)
             break;
         }
 
-        // Количество дескрипторов для ожидания при вызове poll.
-        nfds_t num_pollfds = 0U;
-
         if (accept_new_connections)
         {
             // Ожидаем подключения ещё одного клиента.
-            poll_wait_for_client(pollfds, &num_pollfds, &server);
+            poll_server_wait_for_client(pollfds, &server);
+        }
+        else
+        {
+            // Не ожидаем подключения ещё одного клиента.
+            poll_server_do_not_wait_for_client(pollfds);
         }
 
         for (size_t conn_i = 0U; conn_i < num_connected_clients; ++conn_i)
         {
             switch (conns[conn_i].state)
             {
-            case CONNECTION_INITIALIZED:
+            case CONNECTION_EMPTY:
+                fprintf(stderr, "Unexpected state!\n");
+                exit(EXIT_FAILURE);
             case SEND_FILE_SIZE:
-                poll_wait_on_connection(pollfds, &num_pollfds, &conns[conn_i]);
+            case SEND_DATA_BLOCK:
+                poll_conn_wait_on_socket(pollfds, conn_i, &conns[conn_i]);
                 break;
-            case SEND_FILE_SIZE:
-            case WRITE_DATA_TO_SOCKET:
-                poll_wait_for_data(pollfds, &num_pollfds, &server);
-
-
+            case TRANSFER_FINISHED:
+                poll_conn_do_not_wait_on_socket(pollfds, conn_i);
+                break;
             }
         }
+
+        // Количество дескрипторов для передачи в poll.
+        nfds_t nfds = 1U + num_connected_clients;
+
+        int pollret = poll(pollfds, nfds, -1 /*infinite timeout*/);
+        if (pollret == -1)
+        {
+            fprintf(stderr, "Unable to poll-wait for data on descriptors\n");
+            exit(EXIT_FAILURE);
+        }
+
+        // Проверяем дескриптор для приёма новых клиентов.
+        if (pollfds[0U].revents & POLLIN)
+        {   // Был получен запрос на подключение нового клиента.
+            server_accept_connection_request(&server, &conns[num_connected_clients]);
+
+            conns[num_connected_clients].state = SEND_FILE_SIZE;
+
+            num_connected_clients += 1U;
+            num_active_clients += 1U;
+        }
+
+        for (size_t conn_i = 0U; conn_i < num_connected_clients; ++conn_i)
+        {
+            if (pollfds[1U + conn_i].revents & POLLHUP)
+            {   // Соединение с клиентом оборвалось.
+                server_close_conn_socket(&conns[conn_i]);
+                conns[conn_i].state = TRANSFER_FINISHED;
+                num_active_clients -= 1U;
+                continue;
+            }
+
+            if (pollfds[1U + conn_i].revents & POLLOUT)
+            {
+                // Признак успеха операции.
+                bool success = false;
+
+                switch (conns[conn_i].state)
+                {
+                case CONNECTION_EMPTY:
+                    fprintf(stderr, "Unexpected state!\n");
+                    exit(EXIT_FAILURE);
+                case SEND_FILE_SIZE:
+                    success = server_send_file_size(&server, &conns[conn_i]);
+                    break;
+                case SEND_DATA_BLOCK:
+                    success = server_send_file_block(&server, &conns[conn_i]);
+                    break;
+                case TRANSFER_FINISHED:
+                    break;
+                }
+
+                // Обрабатываем ошибку в операции.
+                if (!success)
+                {
+                    server_close_conn_socket(&conns[conn_i]);
+                    num_active_clients -= 1U;
+                }
+            }
+        }
+
     }
 
     // Останавливаем приём новых клиентов.

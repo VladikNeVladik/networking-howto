@@ -142,7 +142,7 @@ int main()
     // Print incremented variable:
     printf("Result of the computation: %u\n", var);
 
-    // Destroy mutex object (a formality):
+    // Destroy mutex object.
     pthread_mutex_destroy(&mutex_var);
 
     return EXIT_SUCCESS;

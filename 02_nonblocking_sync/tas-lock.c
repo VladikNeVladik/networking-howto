@@ -15,7 +15,7 @@
 // Параметры тестового стенда
 //----------------------------
 
-#define NUM_THREADS 8U
+#define NUM_THREADS 32U
 #define NUM_HARDWARE_THREAD 8U
 
 const size_t NUM_ITERATIONS = 10000000U;
@@ -33,7 +33,6 @@ typedef struct
     atomic_flag lock_taken;
 } TAS_Lock;
 
-const unsigned TAS_CYCLES_TO_SPIN          =    10;
 const unsigned TAS_MIN_BACKOFF_NANOSECONDS =  1000;
 const unsigned TAS_MAX_BACKOFF_NANOSECONDS = 64000;
 

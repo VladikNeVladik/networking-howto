@@ -15,7 +15,7 @@
 // Параметры тестового стенда
 //----------------------------
 
-#define NUM_THREADS 8U
+#define NUM_THREADS 32U
 #define NUM_HARDWARE_THREAD 8U
 
 const size_t NUM_ITERATIONS = 10000000U;
@@ -33,10 +33,9 @@ const size_t NUM_ITERATIONS = 10000000U;
 
 typedef struct
 {
-    _Atomic uint8_t lock_taken;
+    volatile uint8_t lock_taken;
 } TTAS_Lock;
 
-const unsigned TTAS_CYCLES_TO_SPIN          =    10;
 const unsigned TTAS_MIN_BACKOFF_NANOSECONDS =  1000;
 const unsigned TTAS_MAX_BACKOFF_NANOSECONDS = 64000;
 
@@ -49,16 +48,10 @@ void TTAS_acquire(TTAS_Lock* lock)
 {
     unsigned backoff_sleep = TTAS_MIN_BACKOFF_NANOSECONDS;
 
-    // On start spin-loop waiting for the lock to be released:
-    for (unsigned cycle_no = 0; atomic_load_explicit(&lock->lock_taken, memory_order_seq_cst) != 0 && cycle_no < TTAS_CYCLES_TO_SPIN; ++cycle_no)
-    {
-        spinloop_pause();
-    }
-
     // Perform exponential backoff:
     while (1)
     {
-        if (atomic_load_explicit(&lock->lock_taken, memory_order_seq_cst) != 0)
+        if (lock->lock_taken != 0)
         {
             struct timespec to_sleep = {
                 .tv_sec  = 0,

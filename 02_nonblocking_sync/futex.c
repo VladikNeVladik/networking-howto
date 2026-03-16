@@ -100,7 +100,7 @@ void lock(int *mutex)
 void unlock(int *mutex)
 {
     // Атомарное разблокирование счётчика.
-    if (atomic_fetch_sub_explicit(mutex, 1, memory_order_relaxed) != M_LOCKD)
+    if (atomic_fetch_sub_explicit(mutex, 1, memory_order_relaxed) == M_LOCKD_WQ)
     {
         // В случае успеха обновляем состояние фьютекса.
         atomic_store_explicit(mutex, M_ULOCKD, memory_order_release);

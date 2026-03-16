@@ -31,7 +31,7 @@
 // Lock-free кольцевой буфер
 //---------------------------
 
-#define CACHE_LINE_SIZE 256
+#define CACHE_LINE_SIZE 64
 
 typedef struct {
     uint64_t* data;

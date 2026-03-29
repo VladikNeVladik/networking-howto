@@ -14,18 +14,20 @@
 // Параметры тестового стенда
 //----------------------------
 
-#define NUM_WRITERS 2U
-#define NUM_READERS 16U
+#define NUM_WRITERS 4U
+#define NUM_READERS 4U
 #define NUM_THREADS ((NUM_WRITERS) + (NUM_READERS))
 #define NUM_READER_HW_THREADS 4U
 #define NUM_WRITER_HW_THREADS 4U
 #define NUM_HW_THREADS ((NUM_READER_HW_THREADS) + (NUM_WRITER_HW_THREADS))
 
-#define READER_BACKOFF_NANOSECONDS 10000U 
-#define WRITER_LIVELOCK_PREVENTION 1000U
+#define WRITER_BACKOFF_NANOSECONDS 1000U
+#define NUM_WRITES 100000ULL
+#define ONE_INCREMENT 10000000ULL
 
-#define NUM_ITERATIONS 10000000ULL
-#define ONE_INCREMENT  10000000ULL
+#define NUM_READS 10000000ULL
+
+#define CHECK_CORRECTNESS 1U
 
 //-------------------------------
 // Совместное исполнение потоков
@@ -45,9 +47,9 @@ void* thread_writer(void* thread_args)
 
     printf("I am thread#%zu (writer)\n", args->thread_i);
 
-    for (size_t i = 0U; i < NUM_ITERATIONS; ++i)
+    for (size_t i = 0U; i < NUM_WRITES; ++i)
     {
-        uint32_t seq0;
+        uint32_t seq0 = atomic_load_explicit(args->seqlock, memory_order_relaxed);
 
         // Захватываем критическую секцию как писатель.
         while ((seq0 & 1U) ||
@@ -56,12 +58,7 @@ void* thread_writer(void* thread_args)
                 memory_order_acquire,
                 memory_order_relaxed))
         {
-            // Производим ожидание для предотвращения livelock-а писателей.
-            struct timespec time_to_sleep = {
-                .tv_sec  = 0,
-                .tv_nsec = WRITER_LIVELOCK_PREVENTION
-            };
-            nanosleep(&time_to_sleep, NULL);
+            seq0 = atomic_load_explicit(args->seqlock, memory_order_relaxed);
         }
 
         uint64_t current = (((uint64_t) *args->high) << 32U) | *args->low;
@@ -69,16 +66,22 @@ void* thread_writer(void* thread_args)
         // Делаем запись в переменную, охраняемую критической секцией.
         current += ONE_INCREMENT;
 
-        atomic_store_explicit(args->high, current >> 32U, memory_order_relaxed);
-        atomic_store_explicit(args->low, current & 0xFFFFFFFFU, memory_order_relaxed);
+        *args->high = current >> 32U;
+        *args->low  = current & 0xFFFFFFFFU;
 
         // Освобождаем критическую секцию как писатель.
         atomic_store_explicit(args->seqlock, seq0 + 2U, memory_order_release);
+
+        // Производим ожидание, т.к. писатели делают редкие записи.
+        struct timespec time_to_sleep = {
+            .tv_sec  = 0,
+            .tv_nsec = WRITER_BACKOFF_NANOSECONDS
+        };
+        nanosleep(&time_to_sleep, NULL);
     }
 
     return NULL;
 }
-
 
 void* thread_reader(void* thread_args)
 {
@@ -86,7 +89,7 @@ void* thread_reader(void* thread_args)
 
     printf("I am thread#%zu (reader)\n", args->thread_i);
 
-    do
+    for (size_t i = 0U; i < NUM_READS; ++i)
     {
         uint32_t seq0;
         uint32_t seq1;
@@ -98,8 +101,8 @@ void* thread_reader(void* thread_args)
             // Выполняем первое чтение seqlock-а. 
             seq0 = atomic_load_explicit(args->seqlock, memory_order_acquire);
             
-            low  = atomic_load_explicit(args->low,  memory_order_relaxed);
-            high = atomic_load_explicit(args->high, memory_order_relaxed);
+            low  = *args->low;
+            high = *args->high;
 
             // Выполняем второе чтение seqlock-а.
             atomic_thread_fence(memory_order_acquire);
@@ -108,15 +111,7 @@ void* thread_reader(void* thread_args)
         while (seq0 != seq1 || seq0 & 1U);
 
         args->copy = (high << 32U) | low;
-
-        // Производим ожидание, т.к. читателю данные нужны не всегда.
-        struct timespec time_to_sleep = {
-            .tv_sec  = 0,
-            .tv_nsec = READER_BACKOFF_NANOSECONDS
-        };
-        nanosleep(&time_to_sleep, NULL);
-
-    } while (args->copy != NUM_WRITERS * NUM_ITERATIONS * ONE_INCREMENT);
+    }
 
     return NULL;
 }
@@ -205,8 +200,20 @@ int main()
         pthread_attr_destroy(&thread_attributes);
     }
 
-    // Ждём, пока все потоки закончат выполнение.
-    for (size_t i = 0; i < NUM_THREADS; ++i)
+    // Ждём, пока читатели закончат выполнение.
+    for (size_t i = NUM_WRITERS; i < NUM_THREADS; ++i)
+    {
+        int ret = pthread_join(thread_info[i].tid, NULL);
+        if (ret != 0)
+        {
+            fprintf(stderr, "Unable to join thread\n");
+            exit(EXIT_FAILURE);
+        }
+    }
+
+#if CHECK_CORRECTNESS
+    // Ждём, пока писатели закончат выполнение.
+    for (size_t i = 0; i < NUM_WRITERS; ++i)
     {
         int ret = pthread_join(thread_info[i].tid, NULL);
         if (ret != 0)
@@ -220,11 +227,7 @@ int main()
     uint64_t result = (((uint64_t) high) << 32U) | low;
 
     printf("Result of the computation: %lu\n", result);
-
-    for (size_t i = NUM_WRITERS; i < NUM_THREADS; ++i)
-    {
-        printf("Thread #%zu (reader) copy: %lu\n", i, args[i].copy);
-    }
+#endif
 
     return EXIT_SUCCESS;
 }

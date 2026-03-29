@@ -14,16 +14,19 @@
 //----------------------------
 
 #define NUM_WRITERS 4U
-#define NUM_READERS 16U
+#define NUM_READERS 4U
 #define NUM_THREADS ((NUM_WRITERS) + (NUM_READERS))
 #define NUM_READER_HW_THREADS 4U
 #define NUM_WRITER_HW_THREADS 4U
 #define NUM_HW_THREADS ((NUM_READER_HW_THREADS) + (NUM_WRITER_HW_THREADS))
 
-#define READER_BACKOFF_NANOSECONDS 10000U 
+#define WRITER_BACKOFF_NANOSECONDS 1000U
+#define NUM_WRITES 100000ULL
+#define ONE_INCREMENT 10000000ULL
 
-#define NUM_ITERATIONS 10000000ULL
-#define ONE_INCREMENT  10000000ULL
+#define NUM_READS 10000000ULL
+
+#define CHECK_CORRECTNESS 0U
 
 //-------------------------------
 // Совместное исполнение потоков
@@ -42,7 +45,7 @@ void* thread_writer(void* thread_args)
 
     printf("I am thread#%zu (writer)\n", args->thread_i);
 
-    for (size_t i = 0U; i < NUM_ITERATIONS; ++i)
+    for (size_t i = 0U; i < NUM_WRITES; ++i)
     {
         // Захватываем критическую секцию как писатель.
         int ret = pthread_rwlock_wrlock(args->rwlock);
@@ -61,6 +64,13 @@ void* thread_writer(void* thread_args)
             fprintf(stderr, "Unable to release writer lock\n");
             exit(EXIT_FAILURE);
         }
+
+        // Производим ожидание, т.к. писатели делают редкие записи.
+        struct timespec time_to_sleep = {
+            .tv_sec  = 0,
+            .tv_nsec = WRITER_BACKOFF_NANOSECONDS
+        };
+        nanosleep(&time_to_sleep, NULL);
     }
 
     return NULL;
@@ -73,7 +83,7 @@ void* thread_reader(void* thread_args)
 
     printf("I am thread#%zu (reader)\n", args->thread_i);
 
-    do
+    for (size_t i = 0U; i < NUM_READS; ++i)
     {
         // Захватываем критическую секцию как читатель.
         int ret = pthread_rwlock_rdlock(args->rwlock);
@@ -92,15 +102,7 @@ void* thread_reader(void* thread_args)
             fprintf(stderr, "Unable to release reader lock\n");
             exit(EXIT_FAILURE);
         }
-
-        // Производим ожидание, т.к. читателю данные нужны не всегда.
-        struct timespec time_to_sleep = {
-            .tv_sec  = 0,
-            .tv_nsec = READER_BACKOFF_NANOSECONDS
-        };
-        nanosleep(&time_to_sleep, NULL);
-
-    } while (args->copy != NUM_WRITERS * NUM_ITERATIONS * ONE_INCREMENT);
+    }
 
     return NULL;
 }
@@ -187,8 +189,21 @@ int main()
         pthread_attr_destroy(&thread_attributes);
     }
 
-    // Ждём, пока все потоки закончат выполнение.
-    for (size_t i = 0; i < NUM_THREADS; ++i)
+
+    // Ждём, пока читатели закончат выполнение.
+    for (size_t i = NUM_WRITERS; i < NUM_THREADS; ++i)
+    {
+        int ret = pthread_join(thread_info[i].tid, NULL);
+        if (ret != 0)
+        {
+            fprintf(stderr, "Unable to join thread\n");
+            exit(EXIT_FAILURE);
+        }
+    }
+
+#if CHECK_CORRECTNESS
+    // Ждём, пока писатели закончат выполнение.
+    for (size_t i = 0; i < NUM_WRITERS; ++i)
     {
         int ret = pthread_join(thread_info[i].tid, NULL);
         if (ret != 0)
@@ -200,11 +215,7 @@ int main()
 
     // Выводим результат вычисления.
     printf("Result of the computation: %lu\n", var);
-
-    for (size_t i = NUM_WRITERS; i < NUM_THREADS; ++i)
-    {
-        printf("Thread #%zu (reader) copy: %lu\n", i, args[i].copy);
-    }
+#endif
 
     int ret = pthread_rwlock_destroy(&rwlock);
     if (ret != 0)

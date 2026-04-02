@@ -50,7 +50,7 @@ enum
 };
 
 // Обёртка системного вызова futex().
-static int futex(
+static long futex(
     int* uaddr,
     int futex_op,
     int val,
@@ -105,7 +105,7 @@ void unlock(int *mutex)
         // В случае успеха обновляем состояние фьютекса.
         atomic_store_explicit(mutex, M_ULOCKD, memory_order_release);
 
-        // Оповещаем другие потоки, заблокированные на фьютексе.
+        // Пробуждаем ровно один поток, заблокированный на фьютексе.
         futex(mutex, FUTEX_WAKE, 1, NULL, NULL, 0);
     }
 }

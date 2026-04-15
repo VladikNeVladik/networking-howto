@@ -96,7 +96,7 @@ create-src-file: $(DUMMY_SRC)
 
 $(DUMMY_SRC):
 	@mkdir -p build
-	@dd if=/dev/zero of=$(DUMMY_SRC) bs=256M count=1
+	@dd if=/dev/zero of=$(DUMMY_SRC) bs=1024M count=1
 	@echo "AAA" >> $(DUMMY_SRC)
 
 #-------------------
@@ -106,7 +106,7 @@ $(DUMMY_SRC):
 build/%: %.c $(LIBURING_SO) $(LIBAIO_SO)
 	@printf "$(BYELLOW)Building program $(BCYAN)$<$(RESET)\n"
 	@mkdir -p build
-	$(CC) $< $(CFLAGS) -o $@ $(LDFLAGS) $(LINK_TO_LIBURING) $(LINK_TO_LIBAIO)
+	@$(CC) $< $(CFLAGS) -o $@ $(LDFLAGS) $(LINK_TO_LIBURING) $(LINK_TO_LIBAIO)
 
 run: $(EXECUTABLE) $(DUMMY_SRC)
 	@./$(EXECUTABLE) $(DUMMY_SRC) $(DUMMY_DST)

@@ -64,7 +64,7 @@ create-src-file: $(DUMMY_SRC)
 
 $(DUMMY_SRC):
 	@mkdir -p build
-	@dd if=/dev/zero of=$(DUMMY_SRC) bs=256M count=1
+	@dd if=/dev/zero of=$(DUMMY_SRC) bs=512M count=1
 	@echo "AAA" >> $(DUMMY_SRC)
 
 #-------------------

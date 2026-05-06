@@ -35,7 +35,7 @@ typedef struct
     int listen_sock_fd;
 } FILESHARE_SERVER;
 
-#define TRANSFER_BLOCK_SIZE 1024U
+#define TRANSFER_BLOCK_SIZE (16U * 1024U)
 
 // Состояние передачи отдельного клиента.
 typedef enum

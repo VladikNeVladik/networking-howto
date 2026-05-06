@@ -39,7 +39,7 @@ typedef struct
 // Обработка одного соединения
 //=============================
 
-#define TRANSFER_BLOCK_SIZE 1024U
+#define TRANSFER_BLOCK_SIZE (16U * 1024U)
 
 typedef struct
 {
